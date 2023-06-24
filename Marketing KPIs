@@ -1,0 +1,126 @@
+-- PART 1:
+
+-- task 1: → Show trend promotion rate theo tuần = số giao dịch promotion / tổng số giao dịch
+
+With elec_success_trans as (
+   Select transaction_id
+   , month(transaction_time) as [month]
+   , DATEPART( WEEK, transaction_time) AS week_number
+   , promotion_id
+   , IIF ( promotion_id <> '0' , 'is_promo', 'non_promo') AS trans_type
+   From fact_transaction_2020 as fact_2020
+   Left join dim_scenario as scena
+       On fact_2020.scenario_id = scena.scenario_id
+   Where sub_category = 'Electricity'
+       And status_id = 1
+)
+SELECT week_number
+  , COUNT ( CASE WHEN trans_type = 'is_promo' THEN transaction_id END ) AS number_promotion_trans
+  , COUNT (transaction_id) AS number_success_trans
+  , FORMAT ( COUNT ( CASE WHEN trans_type = 'is_promo' THEN transaction_id END ) *1.0 / COUNT (transaction_id), 'p' ) AS promotion_ratio
+FROM elec_success_trans
+GROUP BY week_number
+ORDER BY week_number
+
+--TASK 2: Propotion of customers have other transactions after transaction has promotion
+
+WITH electric_table AS (
+  Select customer_id
+      , transaction_id
+      , promotion_id
+      , IIF ( promotion_id <> '0' , 'is_promo', 'non_promo') AS trans_type
+  From fact_transaction_2020 as fact_2020
+  Left join dim_scenario as scena
+      On fact_2020.scenario_id = scena.scenario_id
+  Where sub_category = 'Electricity'
+      And status_id = 1
+)
+, previous_table AS (
+   SELECT *
+      , LAG (trans_type, 1) OVER ( PARTITION BY customer_id ORDER BY transaction_id ASC ) AS check_previous_tran
+  FROM electric_table
+)
+SELECT COUNT (DISTINCT customer_id) AS customer_make_non_promotion
+  , ( SELECT COUNT (DISTINCT customer_id) FROM previous_table WHERE trans_type = 'is_promo')  AS total_promotion_customer
+FROM previous_table
+WHERE trans_type = 'non_promo' AND check_previous_tran = 'is_promo'
+
+-- COHORT ANALYSIS
+
+-- Basic retention curve
+WITH table_first_time AS (
+  SELECT customer_id, transaction_id, transaction_time
+      ,  MIN ( transaction_time ) OVER ( PARTITION BY customer_id ) AS first_time
+  FROM fact_transaction_2019 fact_19
+  JOIN dim_scenario sce ON fact_19.scenario_id = sce.scenario_id
+  WHERE sub_category = 'Telco Card' AND status_id = 1
+)
+, sub_month AS (
+   SELECT *
+       , DATEDIFF (month, first_time, transaction_time) AS subsequent_month
+   FROM table_first_time
+)
+SELECT subsequent_month
+   , COUNT (DISTINCT customer_id) AS retained_customers
+FROM sub_month
+WHERE MONTH (first_time) = 1
+GROUP BY subsequent_month
+ORDER BY subsequent_month
+
+/* Building an RFM model is to assign Recency, Frequency and Monetary values to each customer. Let’s calculate these metrics for all successful paying customer of ‘Billing’ in 2019 and 2020: 
+- Recency: Difference between each customer's last payment date and '2020-12-31'
+- Frequency: Number of successful payment transactions of each customer
+- Monetary: Total charged amount of each customer  
+- Complete the segmentation according to segment table*/
+
+WITH union_table AS (
+    SELECT YEAR(transaction_time) AS [year]
+        , customer_id
+        , transaction_id
+        , charged_amount
+        , transaction_time
+    FROM fact_transaction_2019 fact_19 
+    LEFT JOIN dim_scenario sce 
+    ON fact_19.scenario_id = sce.scenario_id
+    WHERE status_id = 1 AND sub_category = 'Telco Card'
+    UNION 
+    SELECT YEAR(transaction_time) AS [year]
+        , customer_id
+        , transaction_id
+        , charged_amount
+        , transaction_time
+    FROM fact_transaction_2020 fact_20
+    LEFT JOIN dim_scenario sce 
+    ON fact_20.scenario_id = sce.scenario_id
+    WHERE status_id = 1 AND sub_category = 'Telco Card'
+)
+, rfm_table AS (
+    SELECT
+        customer_id
+        , DATEDIFF(day, 2020-12-31, MAX(transaction_time))*1.0 AS [recency]
+        , COUNT(transaction_id) AS [frequency]
+        , SUM(charged_amount*1.0) AS [monetary]
+    FROM union_table
+    GROUP BY customer_id
+)
+, score_table AS (
+    SELECT *
+        , NTILE(4) OVER ( ORDER BY [recency] ASC ) as r_score
+        , NTILE(4) OVER ( ORDER BY [frequency] DESC ) as f_score
+        , NTILE(4) OVER ( ORDER BY [monetary] DESC ) as m_score
+    FROM rfm_table
+)
+SELECT *
+    , CASE WHEN r_score in(1) and f_score in (1) and m_score in (1) THEN 'Best customer'
+        WHEN r_score in(3,4) and f_score in (3,4) and m_score in (1,2,3,4) THEN 'Lost Bad customers'
+        WHEN r_score in(3,4) and f_score in (2) and m_score in (1,2,3,4) THEN 'Lost customer'
+        WHEN r_score in(2) and f_score in (1) and m_score in (1,2,3,4) THEN 'Almost lost'
+        WHEN r_score in(1,2) and f_score in (1,2,3) and m_score in (1) THEN 'Big Spender'
+        WHEN r_score in(1,2) and f_score in (4) and m_score in (1,2,3,4) THEN 'New customers'
+        WHEN r_score in(1) and f_score in (1) and m_score in (2,3,4) THEN 'Loyal customers'
+        WHEN r_score in(3,4) and f_score in (1) and m_score in (1,2,3,4) THEN 'Hibernating'
+        WHEN r_score in(1,2) and f_score in (2,3) and m_score in (2,3,4) THEN 'Potential Loyalist'
+
+
+
+
